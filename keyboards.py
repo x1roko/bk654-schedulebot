@@ -1,17 +1,12 @@
 from aiogram.types import ReplyKeyboardMarkup, KeyboardButton, InlineKeyboardMarkup, InlineKeyboardButton
-from config import Config
 
-def get_main_keyboard(role):
-    keyboard = []
-    
-    if role in ['manager', 'universal']:
-        keyboard.append([KeyboardButton(text='Получить расписание')])
-        keyboard.append([KeyboardButton(text='Расписание на завтра')])
-        keyboard.append([KeyboardButton(text='Расписание на день')])
-    else:
-        keyboard.append([KeyboardButton(text='Мое расписание')])
-        keyboard.append([KeyboardButton(text='Расписание на завтра')])
-    
+def get_main_keyboard():
+    keyboard = [
+        [KeyboardButton(text="Заполнить расписание")],
+        [KeyboardButton(text="Мое расписание")],
+        [KeyboardButton(text="Расписание на завтра")],
+        [KeyboardButton(text="Общее расписание")]
+    ]
     return ReplyKeyboardMarkup(keyboard=keyboard, resize_keyboard=True)
 
 def get_week_choice_keyboard():

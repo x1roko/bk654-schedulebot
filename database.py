@@ -35,10 +35,8 @@ class Database:
             self.cursor.execute("""
                 CREATE TABLE IF NOT EXISTS users (
                     user_id BIGINT PRIMARY KEY,
-                    username VARCHAR(255),
-                    first_name VARCHAR(255),
-                    last_name VARCHAR(255),
-                    role ENUM('manager', 'employee', 'universal', 'trainer', 'trainer_2') NOT NULL,
+                    first_name VARCHAR(255) NOT NULL,
+                    last_name VARCHAR(255) NOT NULL,
                     registered_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 )
             """)
@@ -67,35 +65,43 @@ class Database:
             print(f"Ошибка при создании таблиц: {err}")
             raise
 
-    def add_user(self, user_id: int, username: Optional[str], first_name: Optional[str], last_name: Optional[str], role: str):
-        """Добавляет нового пользователя или обновляет существующего"""
+    def register_user(self, user_id: int, first_name: str, last_name: str) -> bool:
+        """Регистрирует нового пользователя"""
         try:
             self.cursor.execute("""
-                INSERT INTO users (user_id, username, first_name, last_name, role)
-                VALUES (%s, %s, %s, %s, %s)
+                INSERT INTO users (user_id, first_name, last_name)
+                VALUES (%s, %s, %s)
                 ON DUPLICATE KEY UPDATE 
-                username = VALUES(username),
                 first_name = VALUES(first_name),
-                last_name = VALUES(last_name),
-                role = VALUES(role)
-            """, (user_id, username, first_name, last_name, role))
+                last_name = VALUES(last_name)
+            """, (user_id, first_name, last_name))
             self.connection.commit()
             return True
         except mysql.connector.Error as err:
-            print(f"Ошибка при добавлении пользователя: {err}")
+            print(f"Ошибка при регистрации пользователя: {err}")
             return False
 
-    def get_user(self, user_id: int) -> Optional[Dict]:
-        """Получает данные пользователя по ID"""
+    def is_user_registered(self, user_id: int) -> bool:
+        """Проверяет, зарегистрирован ли пользователь"""
         try:
-            self.cursor.execute("SELECT * FROM users WHERE user_id = %s", (user_id,))
-            return self.cursor.fetchone()
+            self.cursor.execute("SELECT 1 FROM users WHERE user_id = %s", (user_id,))
+            return bool(self.cursor.fetchone())
         except mysql.connector.Error as err:
-            print(f"Ошибка при получении пользователя: {err}")
+            print(f"Ошибка при проверке регистрации пользователя: {err}")
+            return False
+
+    def get_user_name(self, user_id: int) -> Optional[str]:
+        """Получает ФИО пользователя"""
+        try:
+            self.cursor.execute("SELECT first_name, last_name FROM users WHERE user_id = %s", (user_id,))
+            user = self.cursor.fetchone()
+            return f"{user['last_name']} {user['first_name']}" if user else None
+        except mysql.connector.Error as err:
+            print(f"Ошибка при получении имени пользователя: {err}")
             return None
 
-    def save_schedule(self, user_id: int, week_start_date: str, schedule_data: Dict):
-        """Сохраняет расписание пользователя на неделю"""
+    def save_schedule(self, user_id: int, week_start_date: str, schedule_data: Dict) -> bool:
+        """Сохраняет расписание пользователя"""
         try:
             self.cursor.execute("""
                 INSERT INTO schedules (
@@ -127,73 +133,32 @@ class Database:
             print(f"Ошибка при сохранении расписания: {err}")
             return False
 
-    def get_schedule_for_week(self, week_start_date: str) -> List[Dict]:
-        """Получает расписание всех пользователей на указанную неделю"""
+    def get_week_schedule(self, week_start_date: str) -> List[Dict]:
+        """Получает расписание всех на неделю"""
         try:
             self.cursor.execute("""
-                SELECT u.last_name, s.* 
+                SELECT u.first_name, u.last_name, s.* 
                 FROM schedules s
                 JOIN users u ON s.user_id = u.user_id
                 WHERE s.week_start_date = %s
-                ORDER BY u.last_name
+                ORDER BY u.last_name, u.first_name
             """, (week_start_date,))
             return self.cursor.fetchall()
         except mysql.connector.Error as err:
             print(f"Ошибка при получении расписания: {err}")
             return []
 
-    def get_tomorrow_schedule(self, day_of_week: str, week_start_date: str) -> List[Dict]:
-        """Получает расписание на конкретный день недели"""
-        try:
-            self.cursor.execute(f"""
-                SELECT u.last_name, s.{day_of_week} as schedule
-                FROM schedules s
-                JOIN users u ON s.user_id = u.user_id
-                WHERE s.week_start_date = %s AND s.{day_of_week} != 'выходной'
-            """, (week_start_date,))
-            return self.cursor.fetchall()
-        except mysql.connector.Error as err:
-            print(f"Ошибка при получении расписания на день: {err}")
-            return []
-
-    def get_all_users(self) -> List[Dict]:
-        """Получает список всех пользователей"""
-        try:
-            self.cursor.execute("SELECT * FROM users")
-            return self.cursor.fetchall()
-        except mysql.connector.Error as err:
-            print(f"Ошибка при получении списка пользователей: {err}")
-            return []
-
-    def add_user_by_username(self, username: str, role: str) -> bool:
-        """Добавляет пользователя по username (для менеджера)"""
+    def get_user_schedule(self, user_id: int, week_start_date: str) -> Optional[Dict]:
+        """Получает расписание конкретного пользователя"""
         try:
             self.cursor.execute("""
-                INSERT INTO users (user_id, username, role)
-                VALUES ((SELECT user_id FROM users WHERE username = %s), %s, %s)
-                ON DUPLICATE KEY UPDATE role = VALUES(role)
-            """, (username, username, role))
-            self.connection.commit()
-            return self.cursor.rowcount > 0
+                SELECT * FROM schedules 
+                WHERE user_id = %s AND week_start_date = %s
+            """, (user_id, week_start_date))
+            return self.cursor.fetchone()
         except mysql.connector.Error as err:
-            print(f"Ошибка при добавлении пользователя по username: {err}")
-            return False
-
-    def get_users_for_calculation(self, week_start_date: str) -> List[Dict]:
-        """Получает пользователей для расчета зарплаты"""
-        try:
-            self.cursor.execute("""
-                SELECT u.user_id, u.last_name, u.role, 
-                       s.monday, s.tuesday, s.wednesday, s.thursday, 
-                       s.friday, s.saturday, s.sunday
-                FROM users u
-                LEFT JOIN schedules s ON u.user_id = s.user_id AND s.week_start_date = %s
-                WHERE u.role != 'manager'
-            """, (week_start_date,))
-            return self.cursor.fetchall()
-        except mysql.connector.Error as err:
-            print(f"Ошибка при получении пользователей для расчета: {err}")
-            return []
+            print(f"Ошибка при получении расписания пользователя: {err}")
+            return None
 
     def close(self):
         """Закрывает соединение с БД"""

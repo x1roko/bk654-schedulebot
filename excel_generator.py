@@ -1,6 +1,5 @@
 import openpyxl
 from openpyxl.styles import Font, Alignment
-from datetime import datetime
 
 def generate_week_schedule_excel(schedule_data, week_start_date):
     wb = openpyxl.Workbook()
@@ -9,7 +8,7 @@ def generate_week_schedule_excel(schedule_data, week_start_date):
     
     # Заголовки
     days = ['Понедельник', 'Вторник', 'Среда', 'Четверг', 'Пятница', 'Суббота', 'Воскресенье']
-    headers = ['Фамилия'] + days
+    headers = ['Фамилия Имя'] + days
     
     for col_num, header in enumerate(headers, 1):
         cell = ws.cell(row=1, column=col_num, value=header)
@@ -18,7 +17,8 @@ def generate_week_schedule_excel(schedule_data, week_start_date):
     
     # Данные
     for row_num, entry in enumerate(schedule_data, 2):
-        ws.cell(row=row_num, column=1, value=entry['last_name'])
+        name = f"{entry['last_name']} {entry['first_name']}"
+        ws.cell(row=row_num, column=1, value=name)
         ws.cell(row=row_num, column=2, value=entry.get('monday', 'выходной'))
         ws.cell(row=row_num, column=3, value=entry.get('tuesday', 'выходной'))
         ws.cell(row=row_num, column=4, value=entry.get('wednesday', 'выходной'))
@@ -54,7 +54,7 @@ def generate_day_schedule_excel(schedule_entries, day_name):
     
     # Заголовки
     hours = [f"{hour:02d}:00" for hour in range(8, 23)]
-    headers = ['Фамилия'] + hours
+    headers = ['Фамилия Имя'] + hours
     
     for col_num, header in enumerate(headers, 1):
         cell = ws.cell(row=1, column=col_num, value=header)
@@ -63,26 +63,23 @@ def generate_day_schedule_excel(schedule_entries, day_name):
     
     # Данные
     for row_num, entry in enumerate(schedule_entries, 2):
-        last_name = entry['last_name']
+        name = f"{entry['last_name']} {entry['first_name']}"
         time_range = entry.get('schedule', 'выходной')
         
-        ws.cell(row=row_num, column=1, value=last_name)
+        ws.cell(row=row_num, column=1, value=name)
         
         if time_range == 'выходной':
             continue
             
-        try:
-            start_time, end_time = time_range.split('-')
-            start_hour = int(start_time.split(':')[0])
-            end_hour = int(end_time.split(':')[0])
-            
-            for col_num, hour in enumerate(range(8, 23), 2):
-                if start_hour <= hour < end_hour:
-                    ws.cell(row=row_num, column=col_num, value="✓")
-                else:
-                    ws.cell(row=row_num, column=col_num, value="✗")
-        except ValueError:
-            continue
+        start_time, end_time = time_range.split('-')
+        start_hour = int(start_time.split(':')[0])
+        end_hour = int(end_time.split(':')[0])
+        
+        for col_num, hour in enumerate(range(8, 23), 2):
+            if start_hour <= hour < end_hour:
+                ws.cell(row=row_num, column=col_num, value="✓")
+            else:
+                ws.cell(row=row_num, column=col_num, value="✗")
     
     # Настройка ширины столбцов
     for col in ws.columns:

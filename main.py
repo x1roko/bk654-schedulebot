@@ -1,13 +1,15 @@
 import asyncio
 import logging
-from aiogram import Bot, Dispatcher, F
+from aiogram import Bot, Dispatcher, F, types
 from aiogram.filters import Command
-from aiogram.types import Message, CallbackQuery
+from aiogram.types import Message, CallbackQuery, ReplyKeyboardRemove, FSInputFile, BufferedInputFile
+from aiogram.fsm.context import FSMContext
+from aiogram.fsm.state import State, StatesGroup
 from datetime import datetime, timedelta
 from config import Config
 from database import Database
 from keyboards import get_main_keyboard, get_week_choice_keyboard, get_day_choice_keyboard
-from utils import parse_schedule_text, validate_schedule, get_week_start_date, get_next_week_start_date, get_day_of_week, format_schedule_for_tomorrow, calculate_working_hours, calculate_salary
+from utils import parse_schedule_text, validate_schedule, get_week_start_date, get_next_week_start_date, get_day_of_week, format_schedule_for_tomorrow
 from excel_generator import generate_week_schedule_excel, generate_day_schedule_excel
 import os
 
@@ -19,77 +21,190 @@ bot = Bot(token=Config.BOT_TOKEN)
 dp = Dispatcher()
 db = Database()
 
+class Registration(StatesGroup):
+    waiting_for_first_name = State()
+    waiting_for_last_name = State()
+
+class ScheduleInput(StatesGroup):
+    waiting_for_schedule = State()
+
 @dp.message(Command("start"))
-async def cmd_start(message: Message):
+async def cmd_start(message: Message, state: FSMContext):
     user = message.from_user
-    # По умолчанию назначаем роль сотрудника, менеджер может изменить через админку
-    db.add_user(user.id, user.username, user.first_name, user.last_name, 'employee')
     
-    await message.answer(
-        f"Добро пожаловать, {user.first_name}!\n"
-        "Я бот для учета расписания сотрудников.\n\n"
-        "Каждую среду я буду напоминать вам о необходимости указать расписание на следующую неделю.\n"
-        "Также я буду присылать вам ежедневное расписание на завтра.",
-        reply_markup=get_main_keyboard('employee')
-    )
+    if db.is_user_registered(user.id):
+        await message.answer(
+            f"Добро пожаловать, {db.get_user_name(user.id)}!\n"
+            "Используйте кнопки ниже для работы с расписанием.",
+            reply_markup=get_main_keyboard()
+        )
+    else:
+        await message.answer(
+            "Добро пожаловать! Для начала работы вам нужно зарегистрироваться.\n"
+            "Введите ваше имя:",
+            reply_markup=ReplyKeyboardRemove()
+        )
+        await state.set_state(Registration.waiting_for_first_name)
 
-@dp.message(F.text == "Мое расписание")
-async def my_schedule(message: Message):
-    await message.answer(
-        "Выберите неделю:",
-        reply_markup=get_week_choice_keyboard()
-    )
+@dp.message(Registration.waiting_for_first_name)
+async def process_first_name(message: Message, state: FSMContext):
+    await state.update_data(first_name=message.text)
+    await message.answer("Теперь введите вашу фамилию:")
+    await state.set_state(Registration.waiting_for_last_name)
 
-@dp.message(F.text == "Получить расписание")
-async def get_schedule(message: Message):
-    user = db.get_user(message.from_user.id)
-    if not user:
-        await message.answer("Вы не зарегистрированы в системе.")
+@dp.message(Registration.waiting_for_last_name)
+async def process_last_name(message: Message, state: FSMContext):
+    user_data = await state.get_data()
+    first_name = user_data['first_name']
+    last_name = message.text
+    
+    if db.register_user(message.from_user.id, first_name, last_name):
+        await message.answer(
+            f"Спасибо за регистрацию, {last_name} {first_name}!\n"
+            "Теперь вы можете управлять своим расписанием.",
+            reply_markup=get_main_keyboard()
+        )
+    else:
+        await message.answer(
+            "Произошла ошибка при регистрации. Попробуйте еще раз.",
+            reply_markup=ReplyKeyboardRemove()
+        )
+    
+    await state.clear()
+
+@dp.message(F.text == "Заполнить расписание")
+async def fill_schedule(message: Message, state: FSMContext):
+    if not db.is_user_registered(message.from_user.id):
+        await message.answer("Сначала зарегистрируйтесь с помощью /start")
         return
     
     await message.answer(
-        "Выберите неделю:",
+        "📅 Введите ваше расписание на следующую неделю в формате:\n\n"
+        "понедельник: 9-18\n"
+        "вторник: 10-19\n"
+        "среда: выходной\n"
+        "четверг: 11-21\n"
+        "пятница: 9-18\n"
+        "суббота: выходной\n"
+        "воскресенье: выходной\n\n"
+        "Можно вводить как одной строкой, так и по дням:",
+        reply_markup=ReplyKeyboardRemove()
+    )
+    await state.set_state(ScheduleInput.waiting_for_schedule)
+
+@dp.message(ScheduleInput.waiting_for_schedule)
+async def process_schedule_input(message: Message, state: FSMContext):
+    try:
+        schedule_data = parse_schedule_text(message.text)
+        if not validate_schedule(schedule_data):
+            await message.answer(
+                "❌ Некорректный формат. Используйте:\n"
+                "день: время (например: понедельник: 9-18)\n"
+                "или 'выходной'\n\n"
+                "Попробуйте еще раз:",
+                reply_markup=ReplyKeyboardRemove()
+            )
+            return
+        
+        next_week_start = get_next_week_start_date()
+        if db.save_schedule(message.from_user.id, next_week_start, schedule_data):
+            await message.answer(
+                "✅ Расписание на следующую неделю успешно сохранено!",
+                reply_markup=get_main_keyboard()
+            )
+        else:
+            await message.answer(
+                "❌ Ошибка при сохранении. Попробуйте позже.",
+                reply_markup=get_main_keyboard()
+            )
+    except Exception as e:
+        logger.error(f"Ошибка при обработке расписания: {e}")
+        await message.answer(
+            "❌ Произошла ошибка. Проверьте формат и попробуйте еще раз.",
+            reply_markup=get_main_keyboard()
+        )
+    finally:
+        await state.clear()
+
+@dp.message(F.text == "Мое расписание")
+async def my_schedule(message: Message):
+    if not db.is_user_registered(message.from_user.id):
+        await message.answer("Сначала зарегистрируйтесь с помощью /start")
+        return
+    
+    await message.answer(
+        "Выберите неделю для просмотра:",
         reply_markup=get_week_choice_keyboard()
     )
 
 @dp.message(F.text == "Расписание на завтра")
 async def tomorrow_schedule(message: Message):
+    if not db.is_user_registered(message.from_user.id):
+        await message.answer("Сначала зарегистрируйтесь с помощью /start")
+        return
+    
     tomorrow = datetime.now() + timedelta(days=1)
     day_name = get_day_of_week(tomorrow.date())
     week_start = get_week_start_date(tomorrow.date())
     
-    schedule_entries = db.get_tomorrow_schedule(day_name, week_start)
+    schedule_entries = db.get_week_schedule(week_start)
     formatted_schedule = format_schedule_for_tomorrow(schedule_entries, day_name)
     
     await message.answer(formatted_schedule)
 
-@dp.message(F.text == "Расписание на день")
-async def day_schedule(message: Message):
+@dp.message(F.text == "Общее расписание")
+async def full_schedule(message: Message):
+    if not db.is_user_registered(message.from_user.id):
+        await message.answer("Сначала зарегистрируйтесь с помощью /start")
+        return
+    
     await message.answer(
-        "Выберите день:",
-        reply_markup=get_day_choice_keyboard()
+        "Выберите неделю для просмотра:",
+        reply_markup=get_week_choice_keyboard()
     )
 
 @dp.callback_query(F.data.startswith('day_'))
 async def process_day_choice(callback: CallbackQuery):
+    if not db.is_user_registered(callback.from_user.id):
+        await callback.answer("Сначала зарегистрируйтесь с помощью /start")
+        return
+    
     day = callback.data.split('_')[1]
     today = datetime.now().date()
     week_start = get_week_start_date(today)
     
-    schedule_entries = db.get_tomorrow_schedule(day, week_start)
-    filename = generate_day_schedule_excel(schedule_entries, day)
+    schedule_entries = db.get_week_schedule(week_start)
     
-    with open(filename, 'rb') as file:
+    try:
+        filename = generate_day_schedule_excel(schedule_entries, day)
+        
         await callback.message.answer_document(
-            file,
+            FSInputFile(filename, filename=f"schedule_{day}.xlsx"),
             caption=f"Расписание на {day}"
         )
+        
+        # Текстовая версия
+        text_schedule = f"Расписание на {day}:\n\n"
+        for entry in schedule_entries:
+            name = f"{entry['last_name']} {entry['first_name']}"
+            text_schedule += f"{name}: {entry.get('schedule', 'выходной')}\n"
+        
+        await callback.message.answer(text_schedule)
+        os.remove(filename)
+    except Exception as e:
+        logger.error(f"Ошибка при отправке файла: {e}")
+        await callback.message.answer(
+            f"Не удалось отправить расписание на {day}. Попробуйте позже."
+        )
     
-    os.remove(filename)
     await callback.answer()
 
 @dp.callback_query(F.data.in_(['current_week', 'next_week']))
 async def process_week_choice(callback: CallbackQuery):
+    if not db.is_user_registered(callback.from_user.id):
+        await callback.answer("Сначала зарегистрируйтесь с помощью /start")
+        return
+    
     if callback.data == 'current_week':
         week_start = get_week_start_date()
         week_name = "текущую неделю"
@@ -97,114 +212,35 @@ async def process_week_choice(callback: CallbackQuery):
         week_start = get_next_week_start_date()
         week_name = "следующую неделю"
     
-    schedule_data = db.get_schedule_for_week(week_start)
+    schedule_data = db.get_week_schedule(week_start)
     if not schedule_data:
         await callback.message.answer(f"На {week_name} расписание еще не заполнено.")
-        return
-    
-    filename = generate_week_schedule_excel(schedule_data, week_start)
-    
-    with open(filename, 'rb') as file:
-        await callback.message.answer_document(
-            file,
-            caption=f"Расписание на {week_name}"
-        )
-    
-    # Отправляем текстовую версию
-    text_schedule = "Фамилия | Понедельник | Вторник | Среда | Четверг | Пятница | Суббота | Воскресенье\n"
-    for entry in schedule_data:
-        text_schedule += f"{entry['last_name']} | {entry.get('monday', 'выходной')} | {entry.get('tuesday', 'выходной')} | {entry.get('wednesday', 'выходной')} | {entry.get('thursday', 'выходной')} | {entry.get('friday', 'выходной')} | {entry.get('saturday', 'выходной')} | {entry.get('sunday', 'выходной')}\n"
-    
-    await callback.message.answer(text_schedule)
-    
-    os.remove(filename)
-    await callback.answer()
-
-@dp.message(Command("add_user"))
-async def cmd_add_user(message: Message):
-    user = db.get_user(message.from_user.id)
-    if not user or user['role'] != 'manager':
-        await message.answer("У вас нет прав для добавления пользователей.")
-        return
-    
-    args = message.text.split()[1:]
-    if len(args) != 2:
-        await message.answer("Использование: /add_user @username роль\n\nДоступные роли: сотрудник, универсал, тренер, тренер_2")
-        return
-    
-    username = args[0].replace('@', '')
-    role = args[1].lower()
-    
-    role_mapping = {
-        'сотрудник': 'employee',
-        'универсал': 'universal',
-        'тренер': 'trainer',
-        'тренер_2': 'trainer_2'
-    }
-    
-    if role not in role_mapping:
-        await message.answer("Некорректная роль. Доступные роли: сотрудник, универсал, тренер, тренер_2")
-        return
-    
-    if db.add_user_by_username(username, role_mapping[role]):
-        await message.answer(f"Пользователь {username} успешно добавлен с ролью {role}")
-    else:
-        await message.answer(f"Не удалось добавить пользователя {username}. Возможно, он не зарегистрирован в боте.")
-
-@dp.message(Command("calculate"))
-async def cmd_calculate(message: Message):
-    week_start = get_week_start_date()
-    users_data = db.get_users_for_calculation(week_start)
-    
-    if not users_data:
-        await message.answer("Нет данных для расчета.")
-        return
-    
-    result = "Расчет зарплаты за текущую неделю:\n\n"
-    result += "Фамилия | Роль | Часы | Зарплата\n"
-    
-    total_company = 0
-    
-    for user in users_data:
-        total_hours = 0
-        days = ['monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday', 'sunday']
-        
-        for day in days:
-            time_str = user.get(day, 'выходной')
-            total_hours += calculate_working_hours(time_str)
-        
-        rate = Config.RATES.get(user['role'], 0)
-        salary = total_hours * rate
-        total_company += salary
-        
-        result += f"{user['last_name']} | {Config.ROLES[user['role']]} | {total_hours:.1f} ч. | {salary:.2f} руб.\n"
-    
-    result += f"\nОбщая сумма выплат: {total_company:.2f} руб."
-    
-    await message.answer(result)
-
-@dp.message()
-async def process_schedule_input(message: Message):
-    user = db.get_user(message.from_user.id)
-    if not user or user['role'] == 'manager':
+        await callback.answer()
         return
     
     try:
-        schedule_data = parse_schedule_text(message.text)
-        if not validate_schedule(schedule_data):
-            await message.answer("Некорректный формат расписания. Пожалуйста, используйте формат:\n"
-                               "понедельник: 12-20\n"
-                               "вторник: 12:00-20:30\n"
-                               "среда: выходной\n"
-                               "... и так для всех дней недели")
-            return
+        filename = generate_week_schedule_excel(schedule_data, week_start)
         
-        next_week_start = get_next_week_start_date()
-        db.save_schedule(user['user_id'], next_week_start, schedule_data)
-        await message.answer("Ваше расписание успешно сохранено!")
+        await callback.message.answer_document(
+            FSInputFile(filename, filename=f"schedule_{week_start}.xlsx"),
+            caption=f"Расписание на {week_name}"
+        )
+        
+        # Текстовая версия
+        text_schedule = "Фамилия Имя | Понедельник | Вторник | Среда | Четверг | Пятница | Суббота | Воскресенье\n"
+        for entry in schedule_data:
+            name = f"{entry['last_name']} {entry['first_name']}"
+            text_schedule += f"{name} | {entry.get('monday', 'выходной')} | {entry.get('tuesday', 'выходной')} | {entry.get('wednesday', 'выходной')} | {entry.get('thursday', 'выходной')} | {entry.get('friday', 'выходной')} | {entry.get('saturday', 'выход')} | {entry.get('sunday', 'выход')}\n"
+        
+        await callback.message.answer(text_schedule)
+        os.remove(filename)
     except Exception as e:
-        logger.error(f"Ошибка при обработке расписания: {e}")
-        await message.answer("Произошла ошибка при обработке вашего расписания. Пожалуйста, попробуйте еще раз.")
+        logger.error(f"Ошибка при отправке файла: {e}")
+        await callback.message.answer(
+            f"Не удалось отправить расписание на {week_name}. Попробуйте позже."
+        )
+    
+    await callback.answer()
 
 async def scheduler():
     """Планировщик задач"""
@@ -225,19 +261,15 @@ async def send_schedule_reminder():
     """Отправка напоминания о заполнении расписания"""
     users = db.get_all_users()
     for user in users:
-        if user['role'] != 'manager':  # Отправляем только сотрудникам
-            try:
-                await bot.send_message(
-                    user['user_id'],
-                    "Пожалуйста, укажите ваше расписание на следующую неделю.\n\n"
-                    "Пример формата:\n"
-                    "понедельник: 12-20\n"
-                    "вторник: 12:00-20:30\n"
-                    "среда: выходной\n"
-                    "... и так для всех дней недели"
-                )
-            except Exception as e:
-                logger.error(f"Ошибка при отправке напоминания пользователю {user['user_id']}: {e}")
+        try:
+            await bot.send_message(
+                user['user_id'],
+                "⏰ Напоминание: пожалуйста, заполните расписание на следующую неделю!\n"
+                "Нажмите кнопку 'Заполнить расписание' в главном меню.",
+                reply_markup=get_main_keyboard()
+            )
+        except Exception as e:
+            logger.error(f"Ошибка при отправке напоминания пользователю {user['user_id']}: {e}")
 
 async def send_daily_schedule():
     """Отправка расписания на завтра"""
@@ -245,7 +277,7 @@ async def send_daily_schedule():
     day_name = get_day_of_week(tomorrow.date())
     week_start = get_week_start_date(tomorrow.date())
     
-    schedule_entries = db.get_tomorrow_schedule(day_name, week_start)
+    schedule_entries = db.get_week_schedule(week_start)
     formatted_schedule = format_schedule_for_tomorrow(schedule_entries, day_name)
     
     users = db.get_all_users()
